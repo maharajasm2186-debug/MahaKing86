@@ -1,0 +1,63 @@
+# Index Monitor Configuration
+# Production configuration for MahaKing86 repository
+# Credentials are loaded from environment variables (GitHub Secrets)
+
+email:
+  # SMTP Server Configuration for Gmail
+  smtp_server: smtp.gmail.com
+  smtp_port: 587
+  
+  # Sender email - loaded from environment variable SMTP_SENDER_EMAIL
+  # Set in GitHub Secrets or local environment
+  sender_email: ${SMTP_SENDER_EMAIL}
+  
+  # App password - loaded from environment variable SMTP_PASSWORD
+  # Set in GitHub Secrets or local environment
+  sender_password: ${SMTP_PASSWORD}
+  
+  # Recipient email address
+  recipient: maharajasm2186@gmail.com
+
+# Indices to monitor - enable/disable as needed
+indices:
+  sp100: true          # S&P 100
+  sp500: true          # S&P 500
+  sp400: true          # S&P 400 (MidCap)
+  sp600: true          # S&P 600 (SmallCap)
+  nasdaq100: true      # Nasdaq-100
+  russell3000: true    # Russell 3000
+  russell2000: true    # Russell 2000 (SmallCap)
+  russell1000: true    # Russell 1000 (LargeCap)
+  dow_industrial: true # Dow Industrial Average
+
+# Data enrichment settings
+enrichment:
+  # Enable SEC EDGAR lookup for CIK codes
+  enable_sec_lookup: true
+  
+  # Enable GICS industry classification lookup
+  enable_gics_lookup: true
+  
+  # Cache TTL in days (how long to cache company data)
+  cache_ttl_days: 30
+
+# Notification settings
+notification:
+  # Enable/disable email notifications
+  enabled: true
+  
+  # Include press release URL in emails
+  include_press_release_link: true
+
+# Database settings
+database:
+  # SQLite database file path
+  path: index-monitor/data/changes.db
+
+# Logging settings
+logging:
+  # Log level: DEBUG, INFO, WARNING, ERROR
+  level: INFO
+  
+  # Log file path
+  file: index-monitor/logs/monitor.log
