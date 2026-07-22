@@ -53,8 +53,12 @@ jobs:
       # SMTP_SENDER_EMAIL / SMTP_PASSWORD repo secrets below)
       - name: Run Index Monitor
         env:
-          SMTP_SENDER_EMAIL: ${{ secrets.SMTP_SENDER_EMAIL }}
-          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          # Repo secrets are named SENDER_EMAIL / SENDER_APP_PASSWORD (as
+          # already configured) -- mapped here to the env var names
+          # index_monitor_combined.py actually reads (SMTP_SENDER_EMAIL /
+          # SMTP_PASSWORD).
+          SMTP_SENDER_EMAIL: ${{ secrets.SENDER_EMAIL }}
+          SMTP_PASSWORD: ${{ secrets.SENDER_APP_PASSWORD }}
         run: |
           python index_monitor_combined.py
         continue-on-error: true
