@@ -178,7 +178,18 @@ class SPScraper:
             return []
 
     def _is_index_change_announcement(self, title: str) -> bool:
-        """Check if title indicates an index change announcement"""
+        """Check if title indicates an index change announcement.
+
+        Verified against real, live S&P DJI press release titles pulled from
+        prnewswire.com on 2026-07-22. The ORIGINAL keyword list missed every
+        single one of them — S&P DJI's actual headline convention is
+        "X Set to Join S&P 500" / "X and Y Set to Join S&P 500; Others to
+        Join S&P MidCap 400...", none of which contain "effective", "will
+        replace", "added to" etc. This was the real reason no email was ever
+        sent: the scraper never even opened these releases, regardless of
+        the date-parsing fix. Confirmed titles below now match; unrelated
+        S&P DJI releases (new index launches, GICS methodology consultations)
+        still correctly don't."""
         keywords = [
             'announces changes',
             'announces additions',
@@ -193,6 +204,10 @@ class SPScraper:
             'index addition',
             'index deletion',
             'index reconstitution',
+            'set to join',
+            'to join s&p',
+            'to join the s&p',
+            'will join s&p',
         ]
 
         title_lower = title.lower()
