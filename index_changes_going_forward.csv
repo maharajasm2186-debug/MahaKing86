@@ -1,3 +1,1 @@
 index_bucket,source,effective_date,action,ticker,company_name,index_name_from_release,gics_sector,announcement_date,press_release_url,title,note,cik,latest_form_type,latest_form_category,latest_filing_date
-S&P 600,S&P DJI,2026-07-27,ADD,VVX,V2X,S&P SmallCap 600,Industrials,2026-07-27,https://www.prnewswire.com/news-releases/krystal-biotech-set-to-join-sp-midcap-400-tutor-perini-and-v2x-to-join-sp-smallcap-600-302830022.html,,,0001601548,10-Q,Quarterly,2026-05-04
-S&P 600,S&P DJI,2026-07-27,REMOVE,AVNS,Avanos Medical,S&P SmallCap 600,Health Care,2026-07-27,https://www.prnewswire.com/news-releases/krystal-biotech-set-to-join-sp-midcap-400-tutor-perini-and-v2x-to-join-sp-smallcap-600-302830022.html,,,0001606498,DEFA14A,Proxy,2026-07-15
