@@ -719,7 +719,7 @@ def enrich_with_sec_filings(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 # Email notification (Gmail SMTP)
 #
 # Sender:   maggy2186@gmail.com   (KING's designated "from" mailbox)
-# Receiver: maharajasm2186@gmail.com  (KING's own inbox)
+# Receiver: maharajasm2186@gmail.com, chandru@secanalyzer.net  (KING's own inbox)
 #
 # SECURITY: the sender's Gmail credential is a Gmail "App Password" (a
 # 16-character code from Google Account > Security > 2-Step Verification >
@@ -737,7 +737,7 @@ def enrich_with_sec_filings(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 SMTP_SENDER_EMAIL = os.environ.get('SMTP_SENDER_EMAIL', 'maggy2186@gmail.com')
 SMTP_PASSWORD = os.environ.get('SMTP_PASSWORD')  # Gmail App Password -- required, no default
-SMTP_RECEIVER_EMAIL = os.environ.get('SMTP_RECEIVER_EMAIL', 'maharajasm2186@gmail.com')
+SMTP_RECEIVER_EMAIL = os.environ.get('SMTP_RECEIVER_EMAIL', 'maharajasm2186@gmail.com, chandru@secanalyzer.net')
 SMTP_HOST = os.environ.get('SMTP_HOST', 'smtp.gmail.com')
 SMTP_PORT = int(os.environ.get('SMTP_PORT', '587'))
 
