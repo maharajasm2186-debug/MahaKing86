@@ -2,9 +2,12 @@ name: Index Monitor - Stock Index Changes
 
 # Trigger configuration
 on:
-  # Run every 6 hours (0:00, 6:00, 12:00, 18:00 UTC)
+  # Once daily, 02:00 UTC = 7:30 AM IST. Per KING: target the 7:30-9:00 AM
+  # IST window, accepting that GitHub's scheduled cron can lag a few
+  # minutes under load, but should not slip past 9:00 AM. GitHub Actions
+  # cron always runs in UTC, hence the 02:00 UTC trigger time.
   schedule:
-    - cron: '0 0,6,12,18 * * *'
+    - cron: '0 2 * * *'
 
   # Allow manual trigger from Actions tab
   workflow_dispatch:
@@ -108,6 +111,8 @@ jobs:
           path: |
             index_changes_going_forward.csv
             index_changes_going_forward.xlsx
+            index_changes_history.csv
+            index_changes_evidence.xlsx
           retention-days: 30
           if-no-files-found: ignore
 
