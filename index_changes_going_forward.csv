@@ -1,3 +1,1 @@
 index_bucket,source,effective_date,action,ticker,company_name,index_name_from_release,gics_sector,announcement_date,press_release_url,title,note,cik,latest_form_type,latest_form_category,latest_filing_date
-S&P 400,S&P DJI,2026-08-20,ADD,SUI,Sun Communities,S&P MidCap 400,Real Estate,2026-08-20,https://www.prnewswire.com/news-releases/reddit-set-to-join-sp-500-and-sun-communities-to-join-sp-midcap-400-302851432.html,,,0000912593,10-Q,Quarterly,2026-07-28
-S&P 400,S&P DJI,2026-08-20,REMOVE,WBS,Webster Financial,S&P MidCap 400,Financials,2026-08-20,https://www.prnewswire.com/news-releases/reddit-set-to-join-sp-500-and-sun-communities-to-join-sp-midcap-400-302851432.html,,,0000801337,10-Q,Quarterly,2026-07-27
