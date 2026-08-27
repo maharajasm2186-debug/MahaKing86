@@ -100,17 +100,30 @@ def clean_text(soup: BeautifulSoup) -> str:
 
 
 def parse_date_string(date_str: str, fallback_year: Optional[int] = None) -> Optional[str]:
+    # BUG FIX (2026-08-27): S&P DJI does not always spell the month out in
+    # full in its per-row summary table -- verified real case: the
+    # 2026-08-26 "Tenable Holdings Set to Join S&P SmallCap 600" release
+    # prints "Aug 31, 2026" (abbreviated) in the table, even though the
+    # SAME release's prose sentence up top says "August 31" (full). Only
+    # trying %B (full month name) silently failed on the table row, so
+    # effective_date came back None and _extract_table_changes() dropped
+    # BOTH real rows (TENB addition + LEG deletion) via its
+    # `if not effective_date: continue` guard -- with no error, no log
+    # warning surfaced as a failure, and no exception: the run just
+    # reported 0 changes. Trying %b (abbreviated month) as well fixes it.
     date_str = re.sub(r'\s+', ' ', date_str.strip().rstrip('.,'))
-    for fmt in ('%B %d, %Y', '%B %d %Y'):
+    for fmt in ('%B %d, %Y', '%B %d %Y', '%b %d, %Y', '%b %d %Y'):
         try:
             return datetime.strptime(date_str, fmt).date().isoformat()
         except ValueError:
             continue
     if fallback_year:
-        try:
-            return datetime.strptime(f"{date_str} {fallback_year}", '%B %d %Y').date().isoformat()
-        except ValueError:
-            return None
+        for fmt in ('%B %d %Y', '%b %d %Y'):
+            try:
+                return datetime.strptime(f"{date_str} {fallback_year}", fmt).date().isoformat()
+            except ValueError:
+                continue
+        return None
     return None
 
 
