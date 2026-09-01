@@ -1,3 +1,1 @@
 index_bucket,source,effective_date,action,ticker,company_name,index_name_from_release,gics_sector,announcement_date,press_release_url,title,note,cik,latest_form_type,latest_form_category,latest_filing_date
-S&P 600,S&P DJI,2026-08-31,ADD,TENB,Tenable Holdings,S&P SmallCap 600,Information Technology,2026-08-31,https://www.prnewswire.com/news-releases/tenable-holdings-set-to-join-sp-smallcap-600-302861023.html,,,0001660280,10-Q,Quarterly,2026-08-04
-S&P 600,S&P DJI,2026-08-31,REMOVE,LEG,Leggett & Platt,S&P SmallCap 600,Consumer Discretionary,2026-08-31,https://www.prnewswire.com/news-releases/tenable-holdings-set-to-join-sp-smallcap-600-302861023.html,,,0000058492,10-Q,Quarterly,2026-08-06
