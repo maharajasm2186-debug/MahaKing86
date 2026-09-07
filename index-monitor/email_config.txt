@@ -1,0 +1,22 @@
+# Index Monitor - local email settings
+# Edit these yourself any time -- no code changes needed.
+# This file is only used for LOCAL runs on your machine. GitHub Actions /
+# a VPS will keep using their own secrets and ignore this file.
+# This file is in .gitignore -- it will NOT be uploaded to GitHub.
+
+# The Gmail account that sends the report.
+SENDER_EMAIL=maharajasm2186@gmail.com
+
+# Gmail "App Password" (16 characters, from Google Account > Security >
+# 2-Step Verification > App passwords). NOT your normal Gmail password.
+SENDER_APP_PASSWORD=dhmj eson iqml sbmy
+
+# Comma-separated. Add or remove addresses freely.
+TO_EMAILS=msprofessional5085@gmail.com
+CC_EMAILS=maggy2186@gmail.com
+
+# Generates index_changes_evidence.xlsx each run -- a single Excel history
+# of every index change traced to a merger, acquisition, spin-off, business
+# combination, or ticker/company-name change (including ones no distinct
+# index-change press release covered). Set to false to turn it off.
+GENERATE_EVIDENCE_REPORT=true
