@@ -1215,7 +1215,7 @@ SMTP_TO_EMAILS = [e.strip() for e in _LOCAL_EMAIL_CONFIG.get(
 ).split(',') if e.strip()]
 SMTP_CC_EMAILS = [e.strip() for e in _LOCAL_EMAIL_CONFIG.get(
     'CC_EMAILS', os.environ.get(
-        'SMTP_CC_EMAILS', 'chandru@secanalyzer.net'
+        'SMTP_CC_EMAILS', 'maggy2186@gmail.com'
     )
 ).split(',') if e.strip()]
 
