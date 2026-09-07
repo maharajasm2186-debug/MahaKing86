@@ -99,42 +99,59 @@ def clean_text(soup: BeautifulSoup) -> str:
     return re.sub(r'\s+', ' ', soup.get_text(separator=' ')).strip()
 
 
+# Month-name lookup covering full names, standard 3-letter abbreviations,
+# and the nonstandard abbreviations S&P DJI / Nasdaq / FTSE Russell releases
+# actually use in the wild (verified real bug: the Sept 4, 2026 S&P DJI
+# release -- Bloom Energy/Illumina/Everpure joining S&P 500 -- prints its
+# summary-table effective dates as "Sept 21, 2026", and the Aug 26, 2026
+# Tenable Holdings release prints "Aug 31, 2026" in its lead sentence.
+# strptime's %B only accepts the full month name ("September"), so every
+# row in both releases silently failed to parse and was dropped by the
+# `if not effective_date: continue` guard in _extract_table_changes --
+# not a scraping/feed problem, a date-format problem.)
+MONTH_NAME_TO_NUM = {
+    'january': 1, 'jan': 1,
+    'february': 2, 'feb': 2,
+    'march': 3, 'mar': 3,
+    'april': 4, 'apr': 4,
+    'may': 5,
+    'june': 6, 'jun': 6,
+    'july': 7, 'jul': 7,
+    'august': 8, 'aug': 8,
+    'september': 9, 'sep': 9, 'sept': 9,
+    'october': 10, 'oct': 10,
+    'november': 11, 'nov': 11,
+    'december': 12, 'dec': 12,
+}
+
+DATE_STRING_PATTERN = re.compile(
+    r'^([A-Za-z]+)\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s*(\d{4})?$'
+)
+
+
 def parse_date_string(date_str: str, fallback_year: Optional[int] = None) -> Optional[str]:
-    # BUG FIX (2026-08-27): S&P DJI does not always spell the month out in
-    # full in its per-row summary table -- verified real case: the
-    # 2026-08-26 "Tenable Holdings Set to Join S&P SmallCap 600" release
-    # prints "Aug 31, 2026" (abbreviated) in the table, even though the
-    # SAME release's prose sentence up top says "August 31" (full). Only
-    # trying %B (full month name) silently failed on the table row, so
-    # effective_date came back None and _extract_table_changes() dropped
-    # BOTH real rows (TENB addition + LEG deletion) via its
-    # `if not effective_date: continue` guard -- with no error, no log
-    # warning surfaced as a failure, and no exception: the run just
-    # reported 0 changes. Trying %b (abbreviated month) as well fixes it.
+    """Parse a date string of the form "<Month> <Day>[, <Year>]" where
+    <Month> may be spelled out in full ("September"), as a standard
+    3-letter abbreviation ("Sep"), or as one of the nonstandard
+    abbreviations real press releases actually use ("Sept"). Accepts an
+    optional trailing period on the month ("Sept.") and an optional day
+    ordinal suffix ("21st"). Falls back to `fallback_year` when the
+    string has no year of its own."""
     date_str = re.sub(r'\s+', ' ', date_str.strip().rstrip('.,'))
-    # BUG FIX (2026-09-07): the 2026-09-04 "Bloom Energy, Illumina, and
-    # Everpure Set to Join S&P 500..." release prints its table's
-    # effective date as "Sept 21, 2026" -- the nonstandard 4-letter
-    # abbreviation "Sept", not the standard 3-letter %b form "Sep" the fix
-    # above already handles. Same silent-drop failure as before: all 42
-    # real rows in that release came back with effective_date=None and
-    # were skipped with no error. Normalize "Sept" (with or without a
-    # trailing period, e.g. "Sept.") to "Sep" so the existing %b formats
-    # below match it too.
-    date_str = re.sub(r'^Sept\.?(?=\s|\d)', 'Sep', date_str)
-    for fmt in ('%B %d, %Y', '%B %d %Y', '%b %d, %Y', '%b %d %Y'):
-        try:
-            return datetime.strptime(date_str, fmt).date().isoformat()
-        except ValueError:
-            continue
-    if fallback_year:
-        for fmt in ('%B %d %Y', '%b %d %Y'):
-            try:
-                return datetime.strptime(f"{date_str} {fallback_year}", fmt).date().isoformat()
-            except ValueError:
-                continue
+    match = DATE_STRING_PATTERN.match(date_str)
+    if not match:
         return None
-    return None
+    month_str, day_str, year_str = match.groups()
+    month_num = MONTH_NAME_TO_NUM.get(month_str.lower())
+    if not month_num:
+        return None
+    year = int(year_str) if year_str else fallback_year
+    if not year:
+        return None
+    try:
+        return datetime(int(year), month_num, int(day_str)).date().isoformat()
+    except ValueError:
+        return None
 
 
 PUBLISH_DATE_PATTERN = re.compile(r'[A-Z][A-Z\s]{1,20},\s*([A-Za-z]+\s+\d{1,2},\s*\d{4})')
@@ -158,6 +175,95 @@ def extract_publish_year(text: str) -> Optional[int]:
         if parsed:
             return datetime.fromisoformat(parsed).year
     return None
+
+
+# ---------------------------------------------------------------------------
+# Corporate-action detection: merger / acquisition / spin-off / business
+# combination / ticker & company-name change.
+#
+# Per KING's request: when an existing index member is removed -- or has its
+# ticker/company name updated -- because of one of these events, flag WHY,
+# using the press release's own wording, alongside the source link (already
+# captured as press_release_url / the "Refer Link" column). An empty reason
+# means this looks like an ordinary scheduled index rebalance, not a
+# corporate action.
+#
+# Method: scan the full press release text for a sentence that (a) mentions
+# this specific company (by name or ticker) and (b) contains one of the
+# known keyword phrases below. This is a text-pattern match against the
+# real press release, not a fabricated guess -- if the release doesn't say
+# it, no reason is reported.
+# ---------------------------------------------------------------------------
+
+CORPORATE_ACTION_KEYWORDS = {
+    'Merger/Acquisition': [
+        'merger', 'merged with', 'merged into', 'acquisition of', 'acquired by',
+        'to be acquired', 'completion of its acquisition', 'completed its acquisition',
+        'agreement to acquire', 'definitive merger agreement',
+        # Verified real gap: Wikipedia's "changes" history tables overwhelm-
+        # ingly phrase this in active voice past tense -- "X acquired Y",
+        # "X is acquiring Y" -- which none of the passive/noun forms above
+        # matched (confirmed against real 2026 rows: "Devon Energy Corp. is
+        # acquiring Coterra Energy.", "Mars Inc. acquired Kellanova.",
+        # "Sycamore Partners acquired Walgreen Boots Alliance.", etc. -- all
+        # were silently falling through to the generic fallback label
+        # before this fix).
+        'acquired', 'is acquiring', 'to acquire',
+    ],
+    'Spin-off': [
+        'spin-off', 'spinoff', 'spin off',
+        # Verified real gap: same active-voice past-tense issue -- "X spun
+        # off Y" (e.g. "Dupont de Nemours, Inc. spun off Qnity Electronics.",
+        # "Honeywell International Inc. spun off Solstice Advanced
+        # Materials.") wasn't matched by any form above.
+        'spun off',
+    ],
+    'Business Combination': [
+        'business combination',
+    ],
+    'Ticker/Name Change': [
+        'ticker symbol will change', 'ticker symbol change', 'ticker change',
+        'changed its name', 'name change', 'will begin trading under the symbol',
+        'will begin trading under the ticker', 'new ticker symbol',
+        'changing its corporate name', 'corporate name change',
+    ],
+}
+
+_SENTENCE_SPLIT_RE = re.compile(r'(?<=[.!?])\s+')
+_NAME_STOPWORDS = {'inc', 'corp', 'corporation', 'company', 'co', 'ltd', 'llc',
+                    'the', 'group', 'holdings', 'plc'}
+
+
+def _extract_corporate_action_reason(text: str, company_name: Optional[str],
+                                      ticker: Optional[str]) -> str:
+    """Returns a short labeled reason (e.g. "Merger/Acquisition: ...") if the
+    press release text ties this company/ticker to a merger, acquisition,
+    spin-off, business combination, or ticker/name change. Returns '' if
+    nothing relevant is found -- the normal case for a routine rebalance."""
+    if not text or not (company_name or ticker):
+        return ''
+    name_tokens = [t for t in re.split(r'\W+', (company_name or '').lower())
+                   if len(t) > 2 and t not in _NAME_STOPWORDS]
+    name_key = name_tokens[0] if name_tokens else ''
+    ticker_l = (ticker or '').lower()
+    if not name_key and not ticker_l:
+        return ''
+
+    for sentence in _SENTENCE_SPLIT_RE.split(text):
+        s_l = sentence.lower()
+        mentions_company = (
+            (name_key and name_key in s_l)
+            or (ticker_l and re.search(r'\b' + re.escape(ticker_l) + r'\b', s_l))
+        )
+        if not mentions_company:
+            continue
+        for label, phrases in CORPORATE_ACTION_KEYWORDS.items():
+            if any(p in s_l for p in phrases):
+                clean_sentence = ' '.join(sentence.split())
+                if len(clean_sentence) > 280:
+                    clean_sentence = clean_sentence[:277] + '...'
+                return f"{label}: {clean_sentence}"
+    return ''
 
 
 # ---------------------------------------------------------------------------
@@ -207,7 +313,8 @@ class SPScraper:
         r'(S&P\s+\S+(?:\s+\d+)?|Dow[A-Za-z\s]*?)\s+'
         r'(Addition|Deletion)\s+'
         r'(.+?)\s+'
-        r'([A-Z]{2,6})\s+'
+        r'([A-Z]{1,6})\s+'  # ticker: allow 1-letter tickers (e.g. Everpure's "P"),
+                              # verified real bug against the Sept 21, 2026 S&P DJI release
         r'(' + GICS_SECTORS + r')'
     )
 
@@ -305,6 +412,7 @@ class SPScraper:
                 'announcement_date': effective_date,
                 'press_release_url': url,
                 'source': 'S&P DJI',
+                'reason': _extract_corporate_action_reason(text, company.strip(), ticker.strip()),
             })
         return changes
 
@@ -357,9 +465,19 @@ class NasdaqScraper:
     Monday, June 22, 2026" (no "the" before "market open").
     """
 
+    # VERIFIED REAL ROOT CAUSE (2026-08-18): 'https://ir.nasdaq.com/news-releases/'
+    # -- the URL this list used to have -- returns an essentially empty page
+    # (no article links at all), which is very likely why the live scraper
+    # has found ZERO Nasdaq-100 changes on real runs even though individual
+    # article pages parse perfectly once given their real URL (confirmed
+    # against two real releases: the SpaceX/Nasdaq-100 addition and the
+    # June 2026 Quarterly Changes release). The correct listing page is
+    # 'https://ir.nasdaq.com/news-and-events/press-releases' -- confirmed
+    # live: a real server-rendered table (785 releases, paginated) with
+    # both of those exact releases sitting on page 1.
     FEED_URLS = [
+        'https://ir.nasdaq.com/news-and-events/press-releases',
         'https://www.nasdaq.com/news-and-insights/news-releases',
-        'https://ir.nasdaq.com/news-releases/',
         'https://www.prnewswire.com/news/nasdaq/',
     ]
 
@@ -374,11 +492,55 @@ class NasdaqScraper:
         r'effective\s+(?:on|as of)\s+(?:[A-Za-z]+,\s*)?([A-Za-z]+\s+\d{1,2}(?:,?\s*\d{4})?)',
         r'commencing\s+(?:prior to|before)\s+(?:the\s+)?(?:trading\s+)?on\s+(?:[A-Za-z]+,\s*)?([A-Za-z]+\s+\d{1,2}(?:,?\s*\d{4})?)',
         r'will\s+(?:become\s+)?effective\s+(?:[A-Za-z]+,\s*)?([A-Za-z]+\s+\d{1,2}(?:,?\s*\d{4})?)',
+        # VERIFIED REAL GAP (2026-08-18): a single-company narrative release
+        # -- e.g. the real "Space Exploration Technologies Corporation to
+        # Join the Nasdaq-100 Index(R) Beginning July 7, 2026" release --
+        # says "will become a component of the Nasdaq-100 Index(R) prior to
+        # market open on Tuesday, July 7, 2026." with NO "effective" or
+        # "commencing" anywhere near the date, so none of the patterns above
+        # matched and the whole release was silently skipped. This broader,
+        # last-resort fallback drops the "effective"/"commencing" prefix
+        # requirement entirely and just looks for "prior to (market) open
+        # on <date>" on its own. Tried last so it never overrides a more
+        # specific match above.
+        r'prior\s+to\s+(?:the\s+)?(?:market\s+)?open(?:ing)?\s+(?:of\s+trading\s+)?on\s+(?:[A-Za-z]+,\s*)?([A-Za-z]+\s+\d{1,2}(?:,?\s*\d{4})?)',
     ]
 
     # Handles "(Nasdaq: ALAB)", "(NYSE: BRK.A)", or a bare "(ALAB)".
     TICKER_PATTERN = re.compile(
         r'([A-Z][A-Za-z0-9&\.\,\-\s]*?)\s*\((?:Nasdaq|NASD|NYSE|NYSE American)?:?\s*([A-Z]{1,6}(?:\.[A-Z])?)\)'
+    )
+
+    # VERIFIED REAL GAP (2026-08-18): the SpaceX release above is also a
+    # single-company narrative announcement, not the usual "the following
+    # companies will be added: X, Y, Z" list format _find_section() expects
+    # -- so even with the date fixed, _find_section()/_extract_companies()
+    # would still find nothing. This catches "<Company> (Nasdaq: TICK) will
+    # become a component of ... Nasdaq-100" / "... will join the Nasdaq-100"
+    # narrative phrasing directly, as a fallback when the list-style
+    # extraction above comes back empty.
+    # NOTE: deliberately NOT compiled with re.IGNORECASE for the whole
+    # pattern -- that would make the [A-Z] in the name-capture group match
+    # lowercase letters too, which let the match start creep backwards into
+    # preceding lowercase prose (verified real bug while testing: matched
+    # "today announced that Space Exploration..." instead of just "Space
+    # Exploration..."). Only the trailing verb phrase needs to tolerate
+    # case, via the scoped (?i:...) group.
+    NARRATIVE_ADD_PATTERN = re.compile(
+        r'([A-Z][A-Za-z0-9&\.\,\-\s]*?)\s*\((?:Nasdaq|NASD)?:?\s*([A-Z]{1,6}(?:\.[A-Z])?)\)'
+        r'(?i:\s+will\s+(?:become\s+a\s+(?:component|constituent)\s+of|join)\s+(?:the\s+)?nasdaq-100)'
+    )
+
+    # VERIFIED REAL GAP (2026-08-18): a narrative release sometimes names the
+    # company being replaced right in the same sentence -- e.g. the real
+    # "Lumentum Holdings Inc. (Nasdaq: LITE) will become a component of the
+    # Nasdaq-100 Index(R) replacing CoStar Group, Inc. (Nasdaq: CSGP) prior
+    # to market open on..." release. NARRATIVE_ADD_PATTERN alone caught LITE
+    # as an ADD but had no way to also record CSGP as the REMOVE side,
+    # silently dropping half of a real, fully-named event. This catches the
+    # "replacing <Company> (Exchange: TICKER)" clause directly.
+    NARRATIVE_REPLACING_PATTERN = re.compile(
+        r'(?i:replacing)\s+([A-Z][A-Za-z0-9&\.\,\-\s]*?)\s*\((?:Nasdaq|NASD|NYSE|NYSE American)?:?\s*([A-Z]{1,6}(?:\.[A-Z])?)\)'
     )
 
     def __init__(self, session: Optional[requests.Session] = None):
@@ -404,6 +566,16 @@ class NasdaqScraper:
         logger.info(f"[Nasdaq] Found {len(changes)} changes")
         return changes
 
+    # VERIFIED REAL GAP (2026-08-18): ir.nasdaq.com's real press-release
+    # table doesn't hyperlink the headline itself -- each row's clickable
+    # link text is just "HTML" (or "PDF"), with the actual headline sitting
+    # in plain (unlinked) table-cell text next to it. Title-keyword
+    # filtering on the anchor's OWN text would therefore reject every link
+    # on this real page, since "html" never matches TITLE_KEYWORDS. The
+    # href itself reliably contains this URL segment for every real article
+    # on that site, so it's used as a second way in.
+    NASDAQ_ARTICLE_URL_HINT = 'news-release-details'
+
     def _parse_feed(self, content: bytes, feed_url: str = '') -> List[Dict[str, Any]]:
         soup = BeautifulSoup(content, 'html.parser')
         links = []
@@ -412,8 +584,14 @@ class NasdaqScraper:
         links = list({(a.get_text(strip=True), a.get('href', '')) for a in links})
         logger.info(f"[Nasdaq] {feed_url}: found {len(links)} raw links via CSS selectors")
 
-        candidates = [(t, h) for t, h in links if t and h and any(k in t.lower() for k in self.TITLE_KEYWORDS)]
-        logger.info(f"[Nasdaq] {feed_url}: {len(candidates)} of those links passed the title filter")
+        candidates = [
+            (t, h) for t, h in links
+            if h and (
+                (t and any(k in t.lower() for k in self.TITLE_KEYWORDS))
+                or self.NASDAQ_ARTICLE_URL_HINT in h.lower()
+            )
+        ]
+        logger.info(f"[Nasdaq] {feed_url}: {len(candidates)} of those links passed the title/URL filter")
 
         changes = []
         for title, href in candidates:
@@ -427,8 +605,26 @@ class NasdaqScraper:
     def _find_section(self, text: str, action_words: str) -> str:
         """Isolate the sentence introducing additions/removals so we never
         mix the two lists together or pick up unrelated names (e.g. the
-        "Nasdaq (Nasdaq: NDAQ)" self-reference in the intro sentence)."""
-        pattern = re.compile(r'(?:' + action_words + r')[^:]*:\s*(.+?)(?=\.\s*(?:The following|$)|\Z)', re.IGNORECASE | re.DOTALL)
+        "Nasdaq (Nasdaq: NDAQ)" self-reference in the intro sentence).
+
+        VERIFIED REAL BUG (2026-08-18): when a REMOVE list is the LAST list
+        in the release (no further "The following..." paragraph after it),
+        the old lookahead only stopped at another "The following" or the
+        absolute end of the whole page text (\\Z) -- which meant it swept
+        up everything in between, including the "About Nasdaq Global
+        Indexes" / "About Nasdaq" boilerplate that follows on every real
+        release. That boilerplate itself contains "(Nasdaq: NDAQ)" as a
+        self-reference, which TICKER_PATTERN then mistook for one more
+        removed company -- confirmed against a real run's history file,
+        which had a garbled row: ticker NDAQ, company_name "Nasdaq Global
+        Indexes publishes and maintains more than 10,000 indexes across
+        asset classes and geographies. About Nasdaq Nasdaq". Added the
+        standard boilerplate section starters as additional stop points."""
+        pattern = re.compile(
+            r'(?:' + action_words + r')[^:]*:\s*(.+?)'
+            r'(?=\.\s*(?:The following|For (?:additional|more) information|About Nasdaq|About the|$)|\Z)',
+            re.IGNORECASE | re.DOTALL,
+        )
         m = pattern.search(text)
         return m.group(1) if m else ''
 
@@ -438,6 +634,32 @@ class NasdaqScraper:
             name = m.group(1).strip().strip(',').strip()
             ticker = m.group(2)
             if name and 1 <= len(ticker) <= 6:
+                out.append({'name': name, 'ticker': ticker})
+        return out
+
+    def _extract_single_company_narrative(self, text: str) -> List[Dict[str, str]]:
+        """Fallback for narrative-style single-company releases that don't
+        use the list-with-colon 'will be added:' structure _find_section()
+        expects -- see NARRATIVE_ADD_PATTERN's docstring for the real
+        SpaceX/Nasdaq-100 example that exposed this gap. Only ever called
+        when the normal list-based extraction found nothing."""
+        out = []
+        for m in self.NARRATIVE_ADD_PATTERN.finditer(text):
+            name = m.group(1).strip().strip(',').strip()
+            ticker = m.group(2)
+            if name and 1 <= len(ticker) <= 6 and ticker != 'NDAQ':
+                out.append({'name': name, 'ticker': ticker})
+        return out
+
+    def _extract_narrative_replacement(self, text: str) -> List[Dict[str, str]]:
+        """Fallback for the 'replacing <Company> (Exchange: TICKER)' clause
+        some narrative releases include -- see NARRATIVE_REPLACING_PATTERN's
+        docstring for the real Lumentum/CoStar example that exposed this."""
+        out = []
+        for m in self.NARRATIVE_REPLACING_PATTERN.finditer(text):
+            name = m.group(1).strip().strip(',').strip()
+            ticker = m.group(2)
+            if name and 1 <= len(ticker) <= 6 and ticker != 'NDAQ':
                 out.append({'name': name, 'ticker': ticker})
         return out
 
@@ -470,6 +692,7 @@ class NasdaqScraper:
                     'ticker': c['ticker'], 'company_name': c['name'], 'action': 'ADD',
                     'effective_date': effective_date, 'announcement_date': effective_date,
                     'press_release_url': url, 'source': 'Nasdaq',
+                    'reason': _extract_corporate_action_reason(text, c['name'], c['ticker']),
                 })
             rem_section = self._find_section(text, r'will be removed|companies removed|to be removed')
             for c in self._extract_companies(rem_section):
@@ -477,7 +700,31 @@ class NasdaqScraper:
                     'ticker': c['ticker'], 'company_name': c['name'], 'action': 'REMOVE',
                     'effective_date': effective_date, 'announcement_date': effective_date,
                     'press_release_url': url, 'source': 'Nasdaq',
+                    'reason': _extract_corporate_action_reason(text, c['name'], c['ticker']),
                 })
+
+            if not changes:
+                # List-based extraction found nothing -- try the narrative
+                # single-company fallback before giving up on this release.
+                for c in self._extract_single_company_narrative(text):
+                    changes.append({
+                        'ticker': c['ticker'], 'company_name': c['name'], 'action': 'ADD',
+                        'effective_date': effective_date, 'announcement_date': effective_date,
+                        'press_release_url': url, 'source': 'Nasdaq',
+                        'reason': _extract_corporate_action_reason(text, c['name'], c['ticker']),
+                    })
+                # Also check for a same-sentence "replacing X (Exchange:
+                # TICKER)" clause naming the removed company -- easy to miss
+                # since it's not a separate list, just a clause in the ADD
+                # sentence (see the real Lumentum/CoStar example).
+                for c in self._extract_narrative_replacement(text):
+                    changes.append({
+                        'ticker': c['ticker'], 'company_name': c['name'], 'action': 'REMOVE',
+                        'effective_date': effective_date, 'announcement_date': effective_date,
+                        'press_release_url': url, 'source': 'Nasdaq',
+                        'reason': _extract_corporate_action_reason(text, c['name'], c['ticker']),
+                    })
+
             return changes
         except requests.exceptions.RequestException as e:
             logger.warning(f"[Nasdaq] Network error {url}: {e}")
@@ -601,6 +848,152 @@ class RussellScraper:
         except Exception as e:
             logger.warning(f"[Russell] Error extracting {url}: {e}")
             return []
+
+
+def classify_reason_label(reason_text: str) -> str:
+    """Categorize a free-text reason (already known to be about a specific
+    company -- e.g. one cell of a Wikipedia 'changes' table row) using the
+    same keyword groups as _extract_corporate_action_reason. Unlike that
+    function, no company-mention check is needed here since the caller
+    already knows this text is about the row in question."""
+    s_l = (reason_text or '').lower()
+    for label, phrases in CORPORATE_ACTION_KEYWORDS.items():
+        if any(p in s_l for p in phrases):
+            return label
+    return 'Corporate Action / Index Update'
+
+
+# ---------------------------------------------------------------------------
+# Wikipedia-sourced index "changes" history (S&P 500, S&P 400, S&P 600,
+# S&P 100, Dow Industrial, Nasdaq-100).
+#
+# WHY THIS EXISTS: per KING's example -- WestRock silently became Smurfit
+# Westrock (ticker WRK -> SW) after its merger with Smurfit Kappa, without
+# S&P DJI necessarily issuing a press release that reads like a normal
+# "index change" announcement. A merger/spin-off/business-combination can
+# rename or re-ticker an EXISTING index member in place, which the
+# press-release scrapers above can legitimately miss if the release's title
+# or wording doesn't match their "is this an index-change announcement?"
+# filters.
+#
+# Wikipedia's community-maintained "Selected changes" / "Changes" history
+# table for each of these indices tracks every constituent change
+# independently -- INCLUDING pure renames where only one side (Added or
+# Removed) is populated because the same company simply continues under a
+# new ticker/name -- with a plain-English reason already written in
+# (merger, acquisition, spin-off, name change, market-cap reshuffle, etc).
+# Verified live on 2026-08-17: the S&P 500 and Nasdaq-100 pages both have
+# this exact 6-column table (Date, Added Ticker, Added Security, Removed
+# Ticker, Removed Security, Reason); e.g. one real row reads "February 1,
+# 2016 | AVGO | Broadcom | | | Avago Technologies changed its name to
+# Broadcom. Former ticker BRCM retired." -- Removed side blank, meaning no
+# actual departure, just a name/ticker update to the same constituent.
+#
+# HONEST LIMITATION: not confirmed live whether S&P 400 / S&P 600 / S&P 100
+# / Dow maintain the identical table layout -- this scraper looks for it
+# defensively (by table shape, not a hardcoded section name) and simply
+# returns no rows for an index if it can't find a matching table, exactly
+# like the Russell scraper already does when data isn't available. This is
+# a second, independent source, not a replacement -- it never fabricates a
+# reason Wikipedia doesn't state.
+# ---------------------------------------------------------------------------
+
+class WikipediaChangesScraper:
+    PAGES = {
+        'S&P 500': 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies',
+        'S&P 400': 'https://en.wikipedia.org/wiki/List_of_S%26P_400_companies',
+        'S&P 600': 'https://en.wikipedia.org/wiki/List_of_S%26P_600_companies',
+        'S&P 100': 'https://en.wikipedia.org/wiki/S%26P_100',
+        'Dow Industrial': 'https://en.wikipedia.org/wiki/Dow_Jones_Industrial_Average',
+        'Nasdaq-100': 'https://en.wikipedia.org/wiki/Nasdaq-100',
+    }
+
+    def __init__(self, index_bucket: str, session: Optional[requests.Session] = None):
+        self.index_bucket = index_bucket
+        self.url = self.PAGES.get(index_bucket)
+        self.session = session or requests.Session()
+        self.session.headers.update(DEFAULT_HEADERS)
+
+    def scrape(self) -> List[Dict[str, Any]]:
+        if not self.url:
+            return []
+        try:
+            response = self.session.get(self.url, timeout=20)
+            logger.info(f"[WikiHistory] GET {self.url} -> HTTP {response.status_code}, {len(response.content)} bytes")
+            response.raise_for_status()
+            soup = BeautifulSoup(response.content, 'html.parser')
+            table = self._find_changes_table(soup)
+            if table is None:
+                logger.info(
+                    f"[WikiHistory] No 'changes' history table found for {self.index_bucket} "
+                    "-- skipping (not every index page has one)."
+                )
+                return []
+            rows = self._parse_table(table)
+            logger.info(f"[WikiHistory] {self.index_bucket}: {len(rows)} change(s) from Wikipedia history table")
+            return rows
+        except Exception as e:
+            logger.warning(f"[WikiHistory] Error scraping {self.index_bucket}: {e}")
+            return []
+
+    def _find_changes_table(self, soup: BeautifulSoup):
+        """Identify the changes-history table by its DATA shape (6 columns
+        per row, first cell a real date, last cell a real sentence) rather
+        than by section heading or CSS class -- robust to the two-row
+        colspan/rowspan header Wikipedia uses for this table (Date / Added
+        Ticker+Security / Removed Ticker+Security / Reason), which this
+        approach never needs to parse at all."""
+        best_table, best_score = None, 0
+        for table in soup.find_all('table', class_=lambda c: c and 'wikitable' in c):
+            data_rows = 0
+            reason_like = 0
+            for tr in table.find_all('tr'):
+                tds = tr.find_all('td')
+                if len(tds) != 6:
+                    continue
+                cell_texts = [td.get_text(strip=True) for td in tds]
+                if parse_date_string(cell_texts[0]):
+                    data_rows += 1
+                    if len(cell_texts[5]) > 10 and ' ' in cell_texts[5]:
+                        reason_like += 1
+            if data_rows >= 5 and reason_like >= 3 and reason_like > best_score:
+                best_table = table
+                best_score = reason_like
+        return best_table
+
+    def _parse_table(self, table) -> List[Dict[str, Any]]:
+        changes = []
+        for tr in table.find_all('tr'):
+            tds = tr.find_all('td')
+            if len(tds) != 6:
+                continue
+            date_txt, add_ticker, add_name, rem_ticker, rem_name, reason_txt = [
+                td.get_text(strip=True) for td in tds
+            ]
+            effective_date = parse_date_string(date_txt)
+            if not effective_date:
+                continue
+
+            reason = reason_txt.strip()
+            labeled_reason = f"{classify_reason_label(reason)}: {reason}" if reason else ''
+
+            if add_ticker and add_name:
+                changes.append({
+                    'ticker': add_ticker, 'company_name': add_name, 'action': 'ADD',
+                    'index_bucket': self.index_bucket,
+                    'effective_date': effective_date, 'announcement_date': effective_date,
+                    'press_release_url': self.url, 'source': 'Wikipedia (index history)',
+                    'reason': labeled_reason,
+                })
+            if rem_ticker and rem_name:
+                changes.append({
+                    'ticker': rem_ticker, 'company_name': rem_name, 'action': 'REMOVE',
+                    'index_bucket': self.index_bucket,
+                    'effective_date': effective_date, 'announcement_date': effective_date,
+                    'press_release_url': self.url, 'source': 'Wikipedia (index history)',
+                    'reason': labeled_reason,
+                })
+        return changes
 
 
 # ---------------------------------------------------------------------------
@@ -741,8 +1134,10 @@ def enrich_with_sec_filings(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 # ---------------------------------------------------------------------------
 # Email notification (Gmail SMTP)
 #
-# Sender:   maggy2186@gmail.com   (KING's designated "from" mailbox)
-# Receiver: maharajasm2186@gmail.com, chandru@secanalyzer.net  (KING's own inbox)
+# Sender: maggy2186@gmail.com   (KING's designated "from" mailbox)
+# Recipients (per KING's explicit instructions):
+#   To:  maharajasm2186@gmail.com, maharaja@secanalyzer.net
+#   Cc:  lawrence.amalraj@secanalyzer.net, chandru@secanalyzer.net
 #
 # SECURITY: the sender's Gmail credential is a Gmail "App Password" (a
 # 16-character code from Google Account > Security > 2-Step Verification >
@@ -753,87 +1148,398 @@ def enrich_with_sec_filings(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 # environment variable before running this script, e.g. (PowerShell)
 #   $env:SMTP_PASSWORD = "your 16 char app password"
 #   $env:SMTP_SENDER_EMAIL = "maggy2186@gmail.com"
-# On GitHub Actions: store it as a repo secret named SMTP_PASSWORD (the
-# workflow file already references SMTP_SENDER_EMAIL / SMTP_PASSWORD as
-# secrets, so no workflow change is needed for this part).
+# On GitHub Actions: the workflow maps the repo secrets SENDER_EMAIL /
+# SENDER_APP_PASSWORD to SMTP_SENDER_EMAIL / SMTP_PASSWORD.
+#
+# Per KING's request, the email no longer attaches the CSV/Excel file --
+# the report is rendered directly in the email body as an HTML table (with
+# a plain-text fallback for clients that don't render HTML).
 # ---------------------------------------------------------------------------
 
-SMTP_SENDER_EMAIL = os.environ.get('SMTP_SENDER_EMAIL', 'maggy2186@gmail.com')
-SMTP_PASSWORD = os.environ.get('SMTP_PASSWORD')  # Gmail App Password -- required, no default
-SMTP_RECEIVER_EMAIL = os.environ.get('SMTP_RECEIVER_EMAIL', 'maharajasm2186@gmail.com, chandru@secanalyzer.net')
-SMTP_HOST = os.environ.get('SMTP_HOST', 'smtp.gmail.com')
-SMTP_PORT = int(os.environ.get('SMTP_PORT', '587'))
+def _load_local_email_config(path: str = 'email_config.txt') -> Dict[str, str]:
+    """Reads KING's self-editable local config file, if present.
+
+    Plain 'KEY=value' lines, '#' comments allowed, blank lines ignored.
+    This lets KING add/remove the sender email, app password, and To/Cc
+    recipients himself -- on his own machine -- without ever touching the
+    Python code. It is only used for LOCAL runs: GitHub Actions / a VPS
+    won't have this file, so they keep using repo/environment secrets
+    exactly as before (this function simply returns {} if the file is
+    absent, and every value below still falls back to the env var / the
+    hardcoded default).
+
+    SECURITY: this file contains a Gmail App Password in plain text -- it
+    must never be committed to GitHub. It is listed in .gitignore for this
+    reason. Keep it on your own machine only.
+    """
+    values: Dict[str, str] = {}
+    if not os.path.isfile(path):
+        return values
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#') or '=' not in line:
+                    continue
+                key, _, val = line.partition('=')
+                key = key.strip().upper()
+                val = val.strip()
+                if key and val:
+                    values[key] = val
+    except OSError as e:
+        logger.warning(f"Could not read {path}: {e}")
+    return values
 
 
-def build_email_summary(all_rows: List[Dict[str, Any]], future_rows: List[Dict[str, Any]], today: str) -> str:
-    added = [r for r in future_rows if r.get('action') == 'ADD']
-    removed = [r for r in future_rows if r.get('action') == 'REMOVE']
-    lines = [
-        f"Index Monitor run for {today}",
-        "",
-        f"Total changes/events found (including history): {len(all_rows)}",
-        f"Going-forward changes (effective_date >= {today}): {len(future_rows)}  "
-        f"({len(added)} additions, {len(removed)} removals)",
-        "",
-    ]
-    if future_rows:
-        lines.append("Going-forward changes:")
-        for r in sorted(future_rows, key=lambda r: (r.get('index_bucket') or '', r.get('effective_date') or '')):
-            lines.append(
-                f"  [{r.get('index_bucket')}] {r.get('effective_date')}  {r.get('action'):7s} "
-                f"{r.get('ticker') or '':6s} {r.get('company_name') or ''}  "
-                f"({format_latest_filing_text(r)})"
-            )
-    else:
-        lines.append("No going-forward changes were found in this run.")
-    lines.append("")
-    lines.append("Full detail is attached: CSV (all going-forward rows) and Excel workbook "
-                  "('Side by side' and 'Add remove version' sheets).")
+_LOCAL_EMAIL_CONFIG = _load_local_email_config()
+
+SMTP_SENDER_EMAIL = _LOCAL_EMAIL_CONFIG.get(
+    'SENDER_EMAIL', os.environ.get('SMTP_SENDER_EMAIL', 'maggy2186@gmail.com')
+)
+SMTP_PASSWORD = _LOCAL_EMAIL_CONFIG.get(
+    'SENDER_APP_PASSWORD', os.environ.get('SMTP_PASSWORD')
+)  # Gmail App Password -- required, no default
+SMTP_HOST = _LOCAL_EMAIL_CONFIG.get(
+    'SMTP_HOST', os.environ.get('SMTP_HOST', 'smtp.gmail.com')
+)
+SMTP_PORT = int(_LOCAL_EMAIL_CONFIG.get(
+    'SMTP_PORT', os.environ.get('SMTP_PORT', '587')
+))
+
+# Comma-separated. Priority: email_config.txt (local, self-editable) ->
+# env var (GitHub Actions / VPS secrets) -> hardcoded default.
+SMTP_TO_EMAILS = [e.strip() for e in _LOCAL_EMAIL_CONFIG.get(
+    'TO_EMAILS', os.environ.get(
+        'SMTP_TO_EMAILS', 'maharajasm2186@gmail.com,maharaja@secanalyzer.net'
+    )
+).split(',') if e.strip()]
+SMTP_CC_EMAILS = [e.strip() for e in _LOCAL_EMAIL_CONFIG.get(
+    'CC_EMAILS', os.environ.get(
+        'SMTP_CC_EMAILS', 'lawrence.amalraj@secanalyzer.net,chandru@secanalyzer.net'
+    )
+).split(',') if e.strip()]
+
+
+def _is_true(value: Optional[str]) -> bool:
+    return (value or '').strip().lower() in ('1', 'true', 'yes', 'on')
+
+
+# Per KING's request #4: whether to (re)generate the "Evidence" Excel of
+# merger/acquisition/spin-off/business-combination/ticker-name-change-driven
+# index changes on every run. Self-editable the same way as the recipients
+# above -- add a GENERATE_EVIDENCE_REPORT=true/false line to
+# email_config.txt (local runs), or set the GENERATE_EVIDENCE_REPORT env
+# var (GitHub Actions / VPS). Defaults to on.
+GENERATE_EVIDENCE_REPORT = _is_true(_LOCAL_EMAIL_CONFIG.get(
+    'GENERATE_EVIDENCE_REPORT', os.environ.get('GENERATE_EVIDENCE_REPORT', 'true')
+))
+
+# The single table format used everywhere -- CSV, Excel, and the email
+# table -- built on KING's reference file (index_changes_going_forward1.xlsx,
+# sheet "Side by side"), plus the Reason and Refer Link columns added since.
+# No CIK / SEC-filing columns in this version; that
+# lookup code above (get_cik_and_latest_filing / enrich_with_sec_filings /
+# format_latest_filing_text) is left in place but is no longer called from
+# the main flow, per KING's "simplify everywhere" instruction.
+REPORT_COLUMNS = [
+    'Indices', 'Removed', 'Removed Ticker', 'Removed date',
+    'Added', 'Added Ticker', 'Commencing date', 'Remarks', 'Reason', 'Refer Link',
+]
+
+
+def _dedupe_flat_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Defensive de-duplication of raw ADD/REMOVE change rows before they
+    go into any report or the history file. Two rows are the same
+    real-world event if they share the same index bucket, ticker, action,
+    and effective date -- regardless of which press release or which day's
+    run produced them (the same release can be re-scraped on consecutive
+    days until its effective date passes)."""
+    seen: Dict[tuple, Dict[str, Any]] = {}
+    order = []
+    for r in rows:
+        key = (
+            (r.get('index_bucket') or '').strip().lower(),
+            (r.get('ticker') or '').strip().upper(),
+            (r.get('action') or '').strip().upper(),
+            (r.get('effective_date') or '').strip(),
+        )
+        if key in seen:
+            # Same real-world event reported by more than one source (e.g.
+            # a press release AND Wikipedia's history table). Keep the
+            # first-seen row, but backfill a 'reason' from the duplicate if
+            # the first source didn't provide one -- Wikipedia's history
+            # table is often the one carrying the merger/spin-off/rename
+            # explanation that a press release's own wording lacked.
+            if not seen[key].get('reason') and r.get('reason'):
+                seen[key]['reason'] = r['reason']
+            continue
+        seen[key] = r
+        order.append(key)
+    return [seen[k] for k in order]
+
+
+def build_side_by_side_rows(flat_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Turn a flat list of ADD/REMOVE change rows into the 8-column
+    Removed/Added paired table (one row per pairing, grouped and paired per
+    index -- see _pair_added_removed_for_index for the pairing rules)."""
+    flat_rows = _dedupe_flat_rows(flat_rows)
+    added = [r for r in flat_rows if r.get('action') == 'ADD']
+    removed = [r for r in flat_rows if r.get('action') == 'REMOVE']
+
+    added_by_bucket = defaultdict(list)
+    removed_by_bucket = defaultdict(list)
+    for a in added:
+        added_by_bucket[a.get('index_bucket') or ''].append(a)
+    for r in removed:
+        removed_by_bucket[r.get('index_bucket') or ''].append(r)
+
+    all_buckets = sorted(set(added_by_bucket) | set(removed_by_bucket))
+    table_rows = []
+    for bucket in all_buckets:
+        pairs = _pair_added_removed_for_index(added_by_bucket.get(bucket, []), removed_by_bucket.get(bucket, []))
+        for removed_row, added_row, remark in pairs:
+            # Prefer the ADD announcement's press-release link (that's
+            # usually the one naming both the added and removed company
+            # together); fall back to the REMOVE row's link if there's no
+            # ADD side to this pairing.
+            refer_link = ''
+            if added_row and added_row.get('press_release_url'):
+                refer_link = added_row['press_release_url']
+            elif removed_row and removed_row.get('press_release_url'):
+                refer_link = removed_row['press_release_url']
+
+            # Merger / acquisition / spin-off / business combination /
+            # ticker-or-name-change reason, if the press release stated one
+            # for either side of this pairing. Blank means an ordinary
+            # scheduled rebalance -- nothing unusual reported.
+            reasons = []
+            if added_row and added_row.get('reason'):
+                reasons.append(added_row['reason'])
+            if removed_row and removed_row.get('reason') and removed_row.get('reason') not in reasons:
+                reasons.append(removed_row['reason'])
+            reason_text = ' | '.join(reasons)
+
+            # A one-sided pairing (only Removed or only Added) whose Reason
+            # is a Ticker/Name Change is very likely the SAME company
+            # continuing in the index under a new ticker/company name --
+            # e.g. WestRock -> Smurfit Westrock -- rather than a genuine
+            # departure/gap. Make that explicit instead of the generic
+            # "no matching addition/removal found" wording.
+            if remark in ("Added, no matching removal found", "Removed, no matching addition found") \
+                    and reason_text.startswith('Ticker/Name Change'):
+                remark = "Ticker/company name updated — same index member (see Reason)"
+
+            table_rows.append({
+                'Indices': bucket,
+                'Removed': removed_row.get('company_name') if removed_row else '',
+                'Removed Ticker': removed_row.get('ticker') if removed_row else '',
+                'Removed date': removed_row.get('effective_date') if removed_row else '',
+                'Added': added_row.get('company_name') if added_row else '',
+                'Added Ticker': added_row.get('ticker') if added_row else '',
+                'Commencing date': added_row.get('effective_date') if added_row else '',
+                'Remarks': remark,
+                'Reason': reason_text,
+                'Refer Link': refer_link,
+            })
+    return table_rows
+
+
+def build_html_table(rows: List[Dict[str, Any]]) -> str:
+    """Render the 8-column paired table as an HTML <table> for embedding
+    directly in the email body -- per KING's request for a table
+    notification in the mail instead of a file attachment."""
+    if not rows:
+        return "<p><em>No changes to report for this period.</em></p>"
+    th = "".join(
+        f'<th style="padding:6px 10px;border:1px solid #ccc;background:#4472C4;'
+        f'color:#fff;text-align:left;">{h}</th>' for h in REPORT_COLUMNS
+    )
+    body_rows = []
+    for row in rows:
+        cells = []
+        for h in REPORT_COLUMNS:
+            val = row.get(h) or ""
+            if h == 'Refer Link' and val:
+                cell_html = f'<a href="{val}" target="_blank">Source</a>'
+            else:
+                cell_html = val
+            cells.append(f'<td style="padding:6px 10px;border:1px solid #ccc;">{cell_html}</td>')
+        body_rows.append(f"<tr>{''.join(cells)}</tr>")
+    return (
+        '<table style="border-collapse:collapse;font-family:Arial,sans-serif;font-size:13px;">'
+        f'<thead><tr>{th}</tr></thead><tbody>{"".join(body_rows)}</tbody></table>'
+    )
+
+
+def build_plain_text_table(rows: List[Dict[str, Any]]) -> str:
+    if not rows:
+        return "No changes to report for this period."
+    lines = [" | ".join(REPORT_COLUMNS)]
+    for row in rows:
+        lines.append(" | ".join(str(row.get(h) or '') for h in REPORT_COLUMNS))
     return "\n".join(lines)
 
 
-def send_email_report(all_rows: List[Dict[str, Any]], future_rows: List[Dict[str, Any]],
-                       csv_path: str, xlsx_path: str, today: Optional[str] = None) -> bool:
-    """Email the going-forward results to SMTP_RECEIVER_EMAIL from
-    SMTP_SENDER_EMAIL, with the CSV and Excel report attached. Returns
-    False (and logs why) instead of raising, so a mail failure never takes
-    down the rest of the run."""
-    today = today or datetime.now().date().isoformat()
-
+def send_report_email(table_rows: List[Dict[str, Any]], subject: str, intro: str) -> bool:
+    """Send a report as an HTML table embedded in the email body (no
+    attachments). Used for the daily going-forward report AND the weekly /
+    month-end / year-end digests -- same recipients, same table format.
+    Returns False (and logs why) instead of raising, so a mail failure
+    never takes down the rest of the run."""
     if not SMTP_PASSWORD:
         logger.warning(
             "[Email] SMTP_PASSWORD environment variable is not set -- skipping email send. "
-            "Set it to a Gmail App Password for "
-            f"{SMTP_SENDER_EMAIL} (Google Account > Security > 2-Step Verification > App "
-            "passwords) and re-run."
+            f"Set it to a Gmail App Password for {SMTP_SENDER_EMAIL} (Google Account > "
+            "Security > 2-Step Verification > App passwords) and re-run."
         )
+        return False
+    if not SMTP_TO_EMAILS:
+        logger.warning("[Email] No SMTP_TO_EMAILS configured -- skipping email send.")
         return False
 
     msg = EmailMessage()
-    msg['Subject'] = f"Index Monitor — Going Forward Changes — {today}"
+    msg['Subject'] = subject
     msg['From'] = SMTP_SENDER_EMAIL
-    msg['To'] = SMTP_RECEIVER_EMAIL
-    msg.set_content(build_email_summary(all_rows, future_rows, today))
+    msg['To'] = ', '.join(SMTP_TO_EMAILS)
+    if SMTP_CC_EMAILS:
+        msg['Cc'] = ', '.join(SMTP_CC_EMAILS)
 
-    for path, mime in ((csv_path, ('text', 'csv')),
-                        (xlsx_path, ('application', 'vnd.openxmlformats-officedocument.spreadsheetml.sheet'))):
-        try:
-            with open(path, 'rb') as f:
-                msg.add_attachment(f.read(), maintype=mime[0], subtype=mime[1],
-                                    filename=os.path.basename(path))
-        except FileNotFoundError:
-            logger.warning(f"[Email] Attachment not found, skipping: {path}")
+    msg.set_content(f"{intro}\n\n{build_plain_text_table(table_rows)}")
+    msg.add_alternative(f'<p>{intro}</p>{build_html_table(table_rows)}', subtype='html')
 
     try:
         with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as server:
             server.starttls()
             server.login(SMTP_SENDER_EMAIL, SMTP_PASSWORD)
             server.send_message(msg)
-        logger.info(f"[Email] Sent report to {SMTP_RECEIVER_EMAIL} from {SMTP_SENDER_EMAIL}")
+        logger.info(f"[Email] Sent '{subject}' to To={SMTP_TO_EMAILS} Cc={SMTP_CC_EMAILS}")
         return True
     except Exception as e:
-        logger.error(f"[Email] Failed to send report: {e}")
+        logger.error(f"[Email] Failed to send '{subject}': {e}")
         return False
+
+
+# ---------------------------------------------------------------------------
+# Persistent history + weekly / month-end / year-end digests
+#
+# The daily "going forward" report only shows changes whose effective date
+# is still ahead of today. The weekly (Sunday) / month-end / year-end
+# digests need everything that became effective DURING that period, even if
+# it's no longer "going forward" by the time the digest runs -- so every
+# run appends whatever it found (deduped) to a running history file, and
+# the digests read from that file instead of a single run's results.
+# ---------------------------------------------------------------------------
+
+HISTORY_CSV_PATH = 'index_changes_history.csv'
+HISTORY_COLUMNS = ['index_bucket', 'ticker', 'company_name', 'action', 'effective_date', 'press_release_url', 'reason']
+
+# Default fiscal/calendar year-end date (MM-DD). Per KING: "default December
+# 31, 2026" -- override via the YEAR_END_MMDD env var if a different date is
+# ever needed without touching code.
+YEAR_END_MMDD = os.environ.get('YEAR_END_MMDD', '12-31')
+
+
+def _history_key(r: Dict[str, Any]) -> tuple:
+    return (
+        (r.get('index_bucket') or '').strip().lower(),
+        (r.get('ticker') or '').strip().upper(),
+        (r.get('action') or '').strip().upper(),
+        (r.get('effective_date') or '').strip(),
+    )
+
+
+def load_history(path: str = HISTORY_CSV_PATH) -> List[Dict[str, Any]]:
+    if not os.path.exists(path):
+        return []
+    with open(path, 'r', newline='', encoding='utf-8') as f:
+        return list(csv.DictReader(f))
+
+
+def append_to_history(flat_rows: List[Dict[str, Any]], path: str = HISTORY_CSV_PATH) -> List[Dict[str, Any]]:
+    """Append newly-seen changes (deduped against what's already recorded)
+    to the running history file and return the full updated history."""
+    existing = load_history(path)
+    existing_keys = {_history_key(r) for r in existing}
+
+    new_rows = []
+    for r in _dedupe_flat_rows(flat_rows):
+        key = _history_key(r)
+        if key in existing_keys:
+            continue
+        existing_keys.add(key)
+        new_rows.append({
+            'index_bucket': r.get('index_bucket'),
+            'ticker': r.get('ticker'),
+            'company_name': r.get('company_name'),
+            'action': r.get('action'),
+            'effective_date': r.get('effective_date'),
+            'press_release_url': r.get('press_release_url'),
+            'reason': r.get('reason'),
+        })
+
+    combined = existing + new_rows
+    with open(path, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.DictWriter(f, fieldnames=HISTORY_COLUMNS, extrasaction='ignore')
+        writer.writeheader()
+        for row in combined:
+            writer.writerow(row)
+    logger.info(f"[History] {len(new_rows)} new change(s) appended, {len(combined)} total in {path}")
+    return combined
+
+
+def filter_by_effective_range(history_rows: List[Dict[str, Any]], start: str, end: str) -> List[Dict[str, Any]]:
+    """Keep rows whose effective_date falls within [start, end] inclusive
+    -- ISO date strings compare correctly as plain text."""
+    return [r for r in history_rows if start <= (r.get('effective_date') or '') <= end]
+
+
+def get_week_range(today) -> tuple:
+    """The 7 days ending on `today` (Monday..Sunday of the current ISO
+    week) -- meant to be called on a Sunday."""
+    from datetime import timedelta
+    monday = today - timedelta(days=today.weekday())
+    return monday.isoformat(), today.isoformat()
+
+
+def get_month_range(today) -> tuple:
+    return today.replace(day=1).isoformat(), today.isoformat()
+
+
+def get_year_range(today) -> tuple:
+    return today.replace(month=1, day=1).isoformat(), today.isoformat()
+
+
+def is_last_day_of_month(today) -> bool:
+    from datetime import timedelta
+    return (today + timedelta(days=1)).day == 1
+
+
+def is_year_end(today) -> bool:
+    return today.strftime('%m-%d') == YEAR_END_MMDD
+
+
+def send_weekly_digest(history_rows: List[Dict[str, Any]], today) -> bool:
+    start, end = get_week_range(today)
+    table_rows = build_side_by_side_rows(filter_by_effective_range(history_rows, start, end))
+    subject = f"Index Monitor — Weekly Digest — {start} to {end}"
+    intro = f"All index changes effective between {start} and {end} (this week):"
+    return send_report_email(table_rows, subject, intro)
+
+
+def send_month_end_digest(history_rows: List[Dict[str, Any]], today) -> bool:
+    start, end = get_month_range(today)
+    table_rows = build_side_by_side_rows(filter_by_effective_range(history_rows, start, end))
+    subject = f"Index Monitor — Month-End Digest — {start[:7]}"
+    intro = f"All index changes effective between {start} and {end} (this month):"
+    return send_report_email(table_rows, subject, intro)
+
+
+def send_year_end_digest(history_rows: List[Dict[str, Any]], today) -> bool:
+    start, end = get_year_range(today)
+    table_rows = build_side_by_side_rows(filter_by_effective_range(history_rows, start, end))
+    subject = f"Index Monitor — Year-End Digest — {start[:4]}"
+    intro = f"All index changes effective between {start} and {end} (this year):"
+    return send_report_email(table_rows, subject, intro)
 
 
 # ---------------------------------------------------------------------------
@@ -895,6 +1601,16 @@ def run_all() -> Dict[str, List[Dict[str, Any]]]:
     for index_type in ['r3000', 'r2000', 'r1000']:
         results[RussellScraper.INDEX_NAMES[index_type]] = RussellScraper(index_type).scrape()
 
+    # Second, independent source: Wikipedia's maintained "changes" history
+    # tables. Runs AFTER the press-release scrapers above so a specific
+    # press-release link wins as the primary source when both report the
+    # same event (see _dedupe_flat_rows); Wikipedia's main value-add is
+    # catching merger/spin-off-driven ticker & name changes that never got
+    # a distinct index-change press release in the first place -- see
+    # WikipediaChangesScraper's docstring for the WestRock/Smurfit example.
+    for bucket in ['S&P 500', 'S&P 400', 'S&P 600', 'S&P 100', 'Dow Industrial', 'Nasdaq-100']:
+        results.setdefault(bucket, []).extend(WikipediaChangesScraper(bucket).scrape())
+
     return results
 
 
@@ -923,17 +1639,11 @@ def filter_going_forward(rows: List[Dict[str, Any]], as_of: Optional[str] = None
     return kept
 
 
-CSV_COLUMNS = [
-    'index_bucket', 'source', 'effective_date', 'action', 'ticker', 'company_name',
-    'index_name_from_release', 'gics_sector', 'announcement_date', 'press_release_url',
-    'title', 'note',
-    'cik', 'latest_form_type', 'latest_form_category', 'latest_filing_date',
-]
-
-
 def write_csv(rows: List[Dict[str, Any]], path: str) -> None:
+    """`rows` are the 8-column paired table rows (REPORT_COLUMNS keys), the
+    same ones that go into the Excel report and the email table."""
     with open(path, 'w', newline='', encoding='utf-8') as f:
-        writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS, extrasaction='ignore')
+        writer = csv.DictWriter(f, fieldnames=REPORT_COLUMNS, extrasaction='ignore')
         writer.writeheader()
         for row in rows:
             writer.writerow(row)
@@ -941,32 +1651,99 @@ def write_csv(rows: List[Dict[str, Any]], path: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Excel report -- matches the two-sheet layout KING supplied as a reference
-# (sp_dji_shuffle_june2026.xlsx):
-#   1. "Side by side"      -- one row per Removed/Added pairing, plus the
-#      Added company's latest SEC filing.
-#   2. "Add remove version" -- flat one-row-per-event list (both Added AND
-#      Removed), each with its own latest SEC filing (removed CIKs included
-#      too, not just added -- per KING's explicit request).
+# Excel report -- single sheet, the same 8-column Removed/Added table as the
+# email, matching KING's reference file (index_changes_going_forward1.xlsx,
+# sheet "Side by side") exactly.
 # ---------------------------------------------------------------------------
 
 _XLSX_FONT = Font(name='Arial', size=10)
 _XLSX_HEADER_FONT = Font(name='Arial', size=10, bold=True, color='FFFFFF')
 _XLSX_HEADER_FILL = PatternFill(start_color='4472C4', end_color='4472C4', fill_type='solid')
 _XLSX_NOTE_FONT = Font(name='Arial', size=9, italic=True, color='808080')
+_XLSX_LINK_FONT = Font(name='Arial', size=10, color='0563C1', underline='single')
 
 
-def _set_row(ws, row: int, col: int, value, font=_XLSX_FONT):
-    cell = ws.cell(row=row, column=col, value=value)
-    cell.font = font
-    return cell
+def write_xlsx(rows: List[Dict[str, Any]], path: str, sheet_title: str = "Side by side") -> None:
+    wb = Workbook()
+    ws = wb.active
+    ws.title = sheet_title
 
-
-def _write_header(ws, headers: List[str], row: int = 1) -> None:
-    for c, h in enumerate(headers, start=1):
-        cell = ws.cell(row=row, column=c, value=h)
+    for c, h in enumerate(REPORT_COLUMNS, start=1):
+        cell = ws.cell(row=1, column=c, value=h)
         cell.font = _XLSX_HEADER_FONT
         cell.fill = _XLSX_HEADER_FILL
+
+    r = 2
+    for row in rows:
+        for c, col_name in enumerate(REPORT_COLUMNS, start=1):
+            value = row.get(col_name, '')
+            cell = ws.cell(row=r, column=c, value=value)
+            if col_name == 'Refer Link' and value:
+                cell.hyperlink = value
+                cell.font = _XLSX_LINK_FONT
+            else:
+                cell.font = _XLSX_FONT
+        r += 1
+
+    if r == 2:
+        cell = ws.cell(row=r, column=1, value="(no changes found for this report)")
+        cell.font = _XLSX_NOTE_FONT
+
+    widths = {'A': 14, 'B': 32, 'C': 14, 'D': 14, 'E': 32, 'F': 14, 'G': 16, 'H': 34, 'I': 50, 'J': 40}
+    for col, w in widths.items():
+        ws.column_dimensions[col].width = w
+
+    wb.save(path)
+    logger.info(f"Wrote Excel report ({len(rows)} row(s)) to {path}")
+
+
+# ---------------------------------------------------------------------------
+# "Evidence" report -- per KING's request #2/#3/#4: a single Excel file
+# gathering, across all runs, every index change this script has traced
+# specifically to a merger / acquisition / spin-off / business combination /
+# ticker-or-name change -- INCLUDING the ones no distinct index-change press
+# release ever covered (the WikipediaChangesScraper cases). Built from the
+# full accumulated history file (index_changes_history.csv), not just
+# today's run, so it's a complete record over time, not a daily snapshot.
+# Controlled by GENERATE_EVIDENCE_REPORT (see email_config.txt) so KING can
+# turn it on/off himself without touching code.
+# ---------------------------------------------------------------------------
+
+EVIDENCE_XLSX_PATH = 'index_changes_evidence.xlsx'
+_CORPORATE_ACTION_LABELS = set(CORPORATE_ACTION_KEYWORDS.keys())  # Merger/Acquisition, Spin-off, Business Combination, Ticker/Name Change
+
+
+def is_corporate_action_reason(reason: Optional[str]) -> bool:
+    """True only for a REAL merger/acquisition/spin-off/business-combination
+    /ticker-or-name-change reason. Deliberately excludes a blank reason and
+    the generic 'Corporate Action / Index Update' fallback label (used for
+    ordinary rebalance reasons like "Market capitalization change." that
+    aren't a corporate action at all) -- this is what keeps the evidence
+    report to only the events KING actually asked about."""
+    if not reason:
+        return False
+    label = reason.split(':', 1)[0].strip()
+    return label in _CORPORATE_ACTION_LABELS
+
+
+def build_evidence_rows(history_rows: List[Dict[str, Any]], year: int) -> List[Dict[str, Any]]:
+    """Filter the full accumulated history down to real corporate-action
+    -driven changes effective in `year`, then pair them the same way as the
+    main report -- so a pure rename (e.g. WestRock -> Smurfit Westrock)
+    still gets the clear 'same index member' remark instead of looking like
+    an unmatched add/remove."""
+    year_prefix = f"{year:04d}-"
+    filtered = [
+        r for r in history_rows
+        if (r.get('effective_date') or '').startswith(year_prefix)
+        and is_corporate_action_reason(r.get('reason'))
+    ]
+    return build_side_by_side_rows(filtered)
+
+
+def write_evidence_report(rows: List[Dict[str, Any]], year: int, path: str = EVIDENCE_XLSX_PATH) -> None:
+    write_xlsx(rows, path, sheet_title=f"Corporate Actions {year}")
+    logger.info(f"[Evidence] Wrote {len(rows)} corporate-action row(s) for {year} to {path}")
 
 
 def format_latest_filing_text(row: Optional[Dict[str, Any]]) -> str:
@@ -1040,139 +1817,79 @@ def _pair_added_removed_for_index(added_list: List[Dict[str, Any]],
     return pairs
 
 
-def _write_side_by_side_sheet(ws, added: List[Dict[str, Any]], removed: List[Dict[str, Any]]) -> None:
-    headers = ['Indices', 'Removed', 'Removed Cik', 'Removed Ticker', 'Removed date',
-               'Added', 'Added CIK', 'Added Ticker', 'Commencing date',
-               'Remarks', 'Added latest filings']
-    _write_header(ws, headers)
-
-    added_by_bucket = defaultdict(list)
-    removed_by_bucket = defaultdict(list)
-    for a in added:
-        added_by_bucket[a.get('index_bucket') or ''].append(a)
-    for r in removed:
-        removed_by_bucket[r.get('index_bucket') or ''].append(r)
-
-    all_buckets = sorted(set(added_by_bucket) | set(removed_by_bucket))
-    row = 2
-    for bucket in all_buckets:
-        pairs = _pair_added_removed_for_index(added_by_bucket.get(bucket, []), removed_by_bucket.get(bucket, []))
-        for removed_row, added_row, remark in pairs:
-            _set_row(ws, row, 1, bucket)
-            _set_row(ws, row, 2, removed_row.get('company_name') if removed_row else '')
-            _set_row(ws, row, 3, removed_row.get('cik') if removed_row else '')
-            _set_row(ws, row, 4, removed_row.get('ticker') if removed_row else '')
-            _set_row(ws, row, 5, removed_row.get('effective_date') if removed_row else '')
-            _set_row(ws, row, 6, added_row.get('company_name') if added_row else '')
-            _set_row(ws, row, 7, added_row.get('cik') if added_row else '')
-            _set_row(ws, row, 8, added_row.get('ticker') if added_row else '')
-            _set_row(ws, row, 9, added_row.get('effective_date') if added_row else '')
-            _set_row(ws, row, 10, remark)
-            _set_row(ws, row, 11, format_latest_filing_text(added_row))
-            row += 1
-
-    if row == 2:
-        _set_row(ws, row, 1, "(no going-forward changes found in this run)", font=_XLSX_NOTE_FONT)
-
-    widths = {'A': 14, 'B': 32, 'C': 12, 'D': 14, 'E': 14,
-              'F': 32, 'G': 12, 'H': 14, 'I': 16, 'J': 34, 'K': 24}
-    for col, w in widths.items():
-        ws.column_dimensions[col].width = w
-
-
-def _write_add_remove_version_sheet(ws, rows: List[Dict[str, Any]]) -> None:
-    """Flat one-row-per-event list covering BOTH Added and Removed rows,
-    each with its own latest SEC filing -- per KING's explicit request to
-    include filing details "for all even removed ciks also", not just
-    added ones."""
-    headers = ['Indices', 'Company name', 'Cik code', 'Ticker',
-               'Commencing date', 'Status', 'Latest Filing']
-    _write_header(ws, headers)
-
-    sorted_rows = sorted(
-        rows,
-        key=lambda r: (r.get('index_bucket') or '', r.get('effective_date') or '', r.get('company_name') or ''),
-    )
-    row = 2
-    for r in sorted_rows:
-        status = {'ADD': 'Added', 'REMOVE': 'Removed'}.get(r.get('action'), r.get('action') or '')
-        _set_row(ws, row, 1, r.get('index_bucket'))
-        _set_row(ws, row, 2, r.get('company_name'))
-        _set_row(ws, row, 3, r.get('cik'))
-        _set_row(ws, row, 4, r.get('ticker'))
-        _set_row(ws, row, 5, r.get('effective_date'))
-        _set_row(ws, row, 6, status)
-        _set_row(ws, row, 7, format_latest_filing_text(r))
-        row += 1
-
-    if row == 2:
-        _set_row(ws, row, 1, "(no going-forward changes found in this run)", font=_XLSX_NOTE_FONT)
-
-    widths = {'A': 14, 'B': 32, 'C': 12, 'D': 14, 'E': 16, 'F': 10, 'G': 24}
-    for col, w in widths.items():
-        ws.column_dimensions[col].width = w
-
-
-def write_xlsx(rows: List[Dict[str, Any]], path: str) -> None:
-    """Build the two-sheet workbook KING asked for: "Side by side" (Removed
-    vs Added, paired, with the Added company's latest filing) and
-    "Add remove version" (flat Added+Removed list, latest filing for
-    EVERY row including removed ones). `rows` should be the same
-    going-forward, SEC-enriched rows that get written to CSV."""
-    added = [r for r in rows if r.get('action') == 'ADD']
-    removed = [r for r in rows if r.get('action') == 'REMOVE']
-
-    wb = Workbook()
-    ws1 = wb.active
-    ws1.title = "Side by side"
-    _write_side_by_side_sheet(ws1, added, removed)
-
-    ws2 = wb.create_sheet("Add remove version")
-    _write_add_remove_version_sheet(ws2, rows)
-
-    wb.save(path)
-    logger.info(f"Wrote Excel report ({len(added)} added, {len(removed)} removed) to {path}")
-
-
 if __name__ == '__main__':
     all_results = run_all()
-    all_rows = flatten(all_results)
-    today = datetime.now().date().isoformat()
+    all_rows = _dedupe_flat_rows(flatten(all_results))
+    today_date = datetime.now().date()
+    today = today_date.isoformat()
     future_rows = filter_going_forward(all_rows, as_of=today)
-
-    # Enrich only the rows we're actually going to report (going-forward),
-    # not the full history, to keep SEC EDGAR request volume down.
-    future_rows = enrich_with_sec_filings(future_rows)
 
     print(json.dumps(all_results, indent=2))
     print(f"\nTotal changes/events found (including history): {len(all_rows)}")
     print(f"Going-forward changes (effective_date >= {today}): {len(future_rows)}")
 
+    table_rows = build_side_by_side_rows(future_rows)
+
     csv_path = 'index_changes_going_forward.csv'
-    write_csv(future_rows, csv_path)
+    write_csv(table_rows, csv_path)
     print(f"\nGoing-forward results written to: {csv_path}")
 
     xlsx_path = 'index_changes_going_forward.xlsx'
-    write_xlsx(future_rows, xlsx_path)
-    print(f"Excel report written to: {xlsx_path} "
-          f"(sheet 'Side by side' = Removed/Added paired, sheet 'Add remove version' = flat list "
-          f"with latest SEC filing for every row, added AND removed)")
-    if future_rows:
-        for r in future_rows:
-            cik_note = f"CIK {r.get('cik')}" if r.get('cik') else "CIK n/a"
-            filing_note = format_latest_filing_text(r)
-            print(f"  {r.get('effective_date')}  {r.get('action'):8s} {r.get('index_bucket'):16s} "
-                  f"{(r.get('ticker') or ''):8s} {r.get('company_name') or r.get('title') or ''} "
-                  f"[{cik_note}, {filing_note}]")
+    write_xlsx(table_rows, xlsx_path)
+    print(f"Excel report written to: {xlsx_path}")
+
+    if table_rows:
+        for r in table_rows:
+            print(f"  [{r['Indices']}] Removed: {r['Removed'] or '-'} ({r['Removed Ticker'] or '-'})  "
+                  f"Added: {r['Added'] or '-'} ({r['Added Ticker'] or '-'})  {r['Remarks']}")
     else:
         print("  (none found -- either no upcoming changes were published yet, or a source "
               "failed to fetch; check the log lines above for HTTP status codes and link counts)")
 
-    print()
-    email_sent = send_email_report(all_rows, future_rows, csv_path, xlsx_path, today=today)
-    if email_sent:
-        print(f"Email sent to {SMTP_RECEIVER_EMAIL} from {SMTP_SENDER_EMAIL}.")
+    # Persist today's findings into the running history file -- this is
+    # what the weekly / month-end / year-end digests below draw on, since
+    # by the time those run, some of today's "going forward" items will
+    # have already taken effect and dropped out of the going-forward view.
+    history_rows = append_to_history(all_rows)
+
+    # "Evidence" Excel of merger/acquisition/spin-off/business-combination/
+    # ticker-name-change-driven changes for this year, built from the full
+    # accumulated history -- see GENERATE_EVIDENCE_REPORT in email_config.txt.
+    if GENERATE_EVIDENCE_REPORT:
+        evidence_rows = build_evidence_rows(history_rows, today_date.year)
+        write_evidence_report(evidence_rows, today_date.year)
+        print(f"Evidence report ({len(evidence_rows)} corporate-action row(s) for {today_date.year}) "
+              f"written to: {EVIDENCE_XLSX_PATH}")
     else:
-        print(f"Email NOT sent -- see the [Email] warning/error above "
+        print("GENERATE_EVIDENCE_REPORT is off -- skipping evidence report "
+              "(enable it in email_config.txt or the env var to turn back on).")
+
+    print()
+    daily_subject = f"Index Monitor — Going Forward Changes — {today}"
+    daily_intro = f"Going-forward index changes as of {today} ({len(table_rows)} pairing(s)):"
+    email_sent = send_report_email(table_rows, daily_subject, daily_intro)
+    if email_sent:
+        print(f"Daily email sent. To={SMTP_TO_EMAILS} Cc={SMTP_CC_EMAILS} From={SMTP_SENDER_EMAIL}.")
+    else:
+        print("Daily email NOT sent -- see the [Email] warning/error above "
               f"(most likely SMTP_PASSWORD isn't set yet; this needs a Gmail App Password for "
               f"{SMTP_SENDER_EMAIL}, not its regular password).")
+
+    # ---- Weekly (Sunday) / month-end / year-end digests -------------------
+    # All computed from the accumulated history file, not just this run, so
+    # they include everything that became effective during the period even
+    # if it's no longer "going forward" today.
+    if today_date.weekday() == 6:  # Monday=0 ... Sunday=6
+        print("\nToday is Sunday -- sending weekly digest...")
+        sent = send_weekly_digest(history_rows, today_date)
+        print("Weekly digest sent." if sent else "Weekly digest NOT sent (see [Email] log above).")
+
+    if is_last_day_of_month(today_date):
+        print("\nToday is the last day of the month -- sending month-end digest...")
+        sent = send_month_end_digest(history_rows, today_date)
+        print("Month-end digest sent." if sent else "Month-end digest NOT sent (see [Email] log above).")
+
+    if is_year_end(today_date):
+        print(f"\nToday matches the year-end date ({YEAR_END_MMDD}) -- sending year-end digest...")
+        sent = send_year_end_digest(history_rows, today_date)
+        print("Year-end digest sent." if sent else "Year-end digest NOT sent (see [Email] log above).")
