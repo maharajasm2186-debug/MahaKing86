@@ -71,6 +71,13 @@ from datetime import datetime
 from email.message import EmailMessage
 from typing import List, Dict, Any, Optional
 from urllib.parse import urljoin
+from zoneinfo import ZoneInfo
+
+# Per KING: stop the daily "going forward" email entirely -- only send when
+# an already-recorded change's effective_date actually arrives, checked
+# against India Standard Time (not the GitHub Actions runner's UTC clock),
+# since that's the timezone the recipient reads these dates in.
+IST = ZoneInfo("Asia/Kolkata")
 
 import requests
 from bs4 import BeautifulSoup
@@ -1865,31 +1872,30 @@ if __name__ == '__main__':
               "(enable it in email_config.txt or the env var to turn back on).")
 
     print()
-    daily_subject = f"Index Monitor — Going Forward Changes — {today}"
-    daily_intro = f"Going-forward index changes as of {today} ({len(table_rows)} pairing(s)):"
-    email_sent = send_report_email(table_rows, daily_subject, daily_intro)
-    if email_sent:
-        print(f"Daily email sent. To={SMTP_TO_EMAILS} Cc={SMTP_CC_EMAILS} From={SMTP_SENDER_EMAIL}.")
+    # CHANGED per KING (2026-09-07): no more unconditional daily email, and
+    # no more weekly/month-end/year-end digests either -- send ONLY when a
+    # change already sitting in the accumulated history actually takes
+    # effect today, checked against India Standard Time (the recipient's
+    # timezone), not the GitHub Actions runner's UTC clock. This is why the
+    # check reads from `history_rows` (everything ever recorded) rather
+    # than `all_rows` (just this run's scrape) -- a release can be found
+    # today but take effect weeks later and scroll off the source feed
+    # before its effective date arrives, so the match has to be against
+    # the full history, not just today's fresh scrape.
+    ist_today = datetime.now(IST).date().isoformat()
+    effective_today_rows = filter_by_effective_range(history_rows, ist_today, ist_today)
+
+    if effective_today_rows:
+        effective_table_rows = build_side_by_side_rows(effective_today_rows)
+        subject = f"Index Monitor — Effective Today — {ist_today} (IST)"
+        intro = f"Index changes effective today, {ist_today} (IST) ({len(effective_table_rows)} pairing(s)):"
+        email_sent = send_report_email(effective_table_rows, subject, intro)
+        if email_sent:
+            print(f"Effective-date email sent for {ist_today} (IST). "
+                  f"To={SMTP_TO_EMAILS} Cc={SMTP_CC_EMAILS} From={SMTP_SENDER_EMAIL}.")
+        else:
+            print("Effective-date email NOT sent -- see the [Email] warning/error above "
+                  f"(most likely SMTP_PASSWORD isn't set yet; this needs a Gmail App Password for "
+                  f"{SMTP_SENDER_EMAIL}, not its regular password).")
     else:
-        print("Daily email NOT sent -- see the [Email] warning/error above "
-              f"(most likely SMTP_PASSWORD isn't set yet; this needs a Gmail App Password for "
-              f"{SMTP_SENDER_EMAIL}, not its regular password).")
-
-    # ---- Weekly (Sunday) / month-end / year-end digests -------------------
-    # All computed from the accumulated history file, not just this run, so
-    # they include everything that became effective during the period even
-    # if it's no longer "going forward" today.
-    if today_date.weekday() == 6:  # Monday=0 ... Sunday=6
-        print("\nToday is Sunday -- sending weekly digest...")
-        sent = send_weekly_digest(history_rows, today_date)
-        print("Weekly digest sent." if sent else "Weekly digest NOT sent (see [Email] log above).")
-
-    if is_last_day_of_month(today_date):
-        print("\nToday is the last day of the month -- sending month-end digest...")
-        sent = send_month_end_digest(history_rows, today_date)
-        print("Month-end digest sent." if sent else "Month-end digest NOT sent (see [Email] log above).")
-
-    if is_year_end(today_date):
-        print(f"\nToday matches the year-end date ({YEAR_END_MMDD}) -- sending year-end digest...")
-        sent = send_year_end_digest(history_rows, today_date)
-        print("Year-end digest sent." if sent else "Year-end digest NOT sent (see [Email] log above).")
+        print(f"No recorded change has an effective_date of {ist_today} (IST) -- no email sent.")
