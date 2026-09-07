@@ -112,6 +112,16 @@ def parse_date_string(date_str: str, fallback_year: Optional[int] = None) -> Opt
     # warning surfaced as a failure, and no exception: the run just
     # reported 0 changes. Trying %b (abbreviated month) as well fixes it.
     date_str = re.sub(r'\s+', ' ', date_str.strip().rstrip('.,'))
+    # BUG FIX (2026-09-07): the 2026-09-04 "Bloom Energy, Illumina, and
+    # Everpure Set to Join S&P 500..." release prints its table's
+    # effective date as "Sept 21, 2026" -- the nonstandard 4-letter
+    # abbreviation "Sept", not the standard 3-letter %b form "Sep" the fix
+    # above already handles. Same silent-drop failure as before: all 42
+    # real rows in that release came back with effective_date=None and
+    # were skipped with no error. Normalize "Sept" (with or without a
+    # trailing period, e.g. "Sept.") to "Sep" so the existing %b formats
+    # below match it too.
+    date_str = re.sub(r'^Sept\.?(?=\s|\d)', 'Sep', date_str)
     for fmt in ('%B %d, %Y', '%B %d %Y', '%b %d, %Y', '%b %d %Y'):
         try:
             return datetime.strptime(date_str, fmt).date().isoformat()
