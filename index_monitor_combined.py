@@ -1213,18 +1213,67 @@ SMTP_PORT = int(_LOCAL_EMAIL_CONFIG.get(
     'SMTP_PORT', os.environ.get('SMTP_PORT', '587')
 ))
 
-# Comma-separated. Priority: email_config.txt (local, self-editable) ->
-# env var (GitHub Actions / VPS secrets) -> hardcoded default.
-SMTP_TO_EMAILS = [e.strip() for e in _LOCAL_EMAIL_CONFIG.get(
-    'TO_EMAILS', os.environ.get(
-        'SMTP_TO_EMAILS', 'maharajasm2186@gmail.com,maharaja@secanalyzer.net, chandru@secanalyzer.net'
+# Comma-separated recipient lists.
+#
+# Priority (first NON-EMPTY source wins):
+#   1. email_config.txt  (local, self-editable)   -- key TO_EMAILS / CC_EMAILS
+#   2. env var           (GitHub Actions / VPS)   -- SMTP_TO_EMAILS / SMTP_CC_EMAILS
+#   3. hardcoded default below
+#
+# IMPORTANT: we use `or` chaining instead of dict.get(key, default) on
+# purpose. `.get('TO_EMAILS', <default>)` only falls back to <default>
+# when the KEY IS MISSING from the dict. If email_config.txt (or the
+# process env) contains the key with an EMPTY value -- e.g. a line
+# "TO_EMAILS=" with nothing after the '=' -- then `.get()` returns ''
+# and the list comprehension below produces [], silently dropping every
+# recipient including chandru@secanalyzer.net. `or` treats '' the same as
+# "not set" and correctly falls through to the next source.
+DEFAULT_TO_EMAILS = 'maharajasm2186@gmail.com,maharaja@secanalyzer.net,chandru@secanalyzer.net'
+DEFAULT_CC_EMAILS = 'maggy2186@gmail.com,lawrence.amalraj@secanalyzer.net'
+
+
+def _parse_email_list(raw: Optional[str]) -> List[str]:
+    """Split a comma-separated recipient string into a clean,
+    de-duplicated, order-preserving list."""
+    if not raw:
+        return []
+    seen = set()
+    result = []
+    for e in raw.split(','):
+        e = e.strip()
+        if e and e not in seen:
+            seen.add(e)
+            result.append(e)
+    return result
+
+
+_to_raw = (
+    _LOCAL_EMAIL_CONFIG.get('TO_EMAILS')
+    or os.environ.get('SMTP_TO_EMAILS')
+    or DEFAULT_TO_EMAILS
+)
+_cc_raw = (
+    _LOCAL_EMAIL_CONFIG.get('CC_EMAILS')
+    or os.environ.get('SMTP_CC_EMAILS')
+    or DEFAULT_CC_EMAILS
+)
+
+SMTP_TO_EMAILS = _parse_email_list(_to_raw)
+SMTP_CC_EMAILS = _parse_email_list(_cc_raw)
+
+# One-time debug logging so a silently-shadowing config is immediately
+# visible in the run log. Remove/comment these lines once verified.
+logger.info(f"[email-config] email_config.txt TO_EMAILS    = {_LOCAL_EMAIL_CONFIG.get('TO_EMAILS')!r}")
+logger.info(f"[email-config] env SMTP_TO_EMAILS           = {os.environ.get('SMTP_TO_EMAILS')!r}")
+logger.info(f"[email-config] resolved SMTP_TO_EMAILS      = {SMTP_TO_EMAILS}")
+logger.info(f"[email-config] email_config.txt CC_EMAILS    = {_LOCAL_EMAIL_CONFIG.get('CC_EMAILS')!r}")
+logger.info(f"[email-config] env SMTP_CC_EMAILS           = {os.environ.get('SMTP_CC_EMAILS')!r}")
+logger.info(f"[email-config] resolved SMTP_CC_EMAILS      = {SMTP_CC_EMAILS}")
+if 'chandru@secanalyzer.net' not in SMTP_TO_EMAILS:
+    logger.warning(
+        "[email-config] chandru@secanalyzer.net is NOT in the resolved TO list! "
+        "Check email_config.txt (TO_EMAILS= line) and the SMTP_TO_EMAILS env var / repo secret."
     )
-).split(',') if e.strip()]
-SMTP_CC_EMAILS = [e.strip() for e in _LOCAL_EMAIL_CONFIG.get(
-    'CC_EMAILS', os.environ.get(
-        'SMTP_CC_EMAILS', 'maggy2186@gmail.com,lawrence.amalraj@secanalyzer.net'
-    )
-).split(',') if e.strip()]
 
 
 def _is_true(value: Optional[str]) -> bool:
