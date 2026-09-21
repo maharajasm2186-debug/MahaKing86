@@ -1217,12 +1217,12 @@ SMTP_PORT = int(_LOCAL_EMAIL_CONFIG.get(
 # env var (GitHub Actions / VPS secrets) -> hardcoded default.
 SMTP_TO_EMAILS = [e.strip() for e in _LOCAL_EMAIL_CONFIG.get(
     'TO_EMAILS', os.environ.get(
-        'SMTP_TO_EMAILS', 'maharajasm2186@gmail.com,maharaja@secanalyzer.net'
+        'SMTP_TO_EMAILS', 'maharajasm2186@gmail.com,maharaja@secanalyzer.net, chandru@secanalyzer.net'
     )
 ).split(',') if e.strip()]
 SMTP_CC_EMAILS = [e.strip() for e in _LOCAL_EMAIL_CONFIG.get(
     'CC_EMAILS', os.environ.get(
-        'SMTP_CC_EMAILS', 'maggy2186@gmail.com'
+        'SMTP_CC_EMAILS', 'maggy2186@gmail.com,lawrence.amalraj@secanalyzer.net'
     )
 ).split(',') if e.strip()]
 
