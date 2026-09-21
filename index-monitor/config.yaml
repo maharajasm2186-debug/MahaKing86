@@ -16,7 +16,7 @@ email:
   sender_password: ${SMTP_PASSWORD}
   
   # Recipient email address
-  recipient: maharajasm2186@gmail.com
+  recipient: maharajasm2186@gmail.com, chandru@secanalyzer.net, lawrence.amalraj@secanalyzer.net
 
 # Indices to monitor - enable/disable as needed
 indices:
