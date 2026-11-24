@@ -2140,3 +2140,13 @@ S&P 600,SITE,SiteOne Landscape Supply,ADD,2026-11-19,https://www.prnewswire.com/
 S&P 600,ITGR,Integer Holdings,REMOVE,2026-11-19,https://www.prnewswire.com/news-releases/siteone-landscape-supply-set-to-join-sp-smallcap-600-302941130.html,"Merger/Acquisition: (NYSE: KKR ) is acquiring Integer Holdings in a deal expected to close soon, pending final closing conditions."
 S&P 400,VSCO (now VSXY)[82],Victoria's Secret,REMOVE,2023-06-19,https://en.wikipedia.org/wiki/List_of_S%26P_400_companies,Corporate Action / Index Update: Market capitalization change.[81]
 S&P 400,VSCO (now VSXY)[82],Victoria's Secret,ADD,2021-08-04,https://en.wikipedia.org/wiki/List_of_S%26P_400_companies,Spin-off: S&P 500 constituentL Brandsspun off Victoria's Secret.[133]
+S&P 500,SN,SharkNinja,ADD,2026-12-02,https://www.prnewswire.com/news-releases/sharkninja-set-to-join-sp-500-others-to-join-sp-midcap-400-and-sp-smallcap-600-302948731.html,
+S&P 500,AES,AES,REMOVE,2026-12-02,https://www.prnewswire.com/news-releases/sharkninja-set-to-join-sp-500-others-to-join-sp-midcap-400-and-sp-smallcap-600-302948731.html,
+S&P 400,RIG,Transocean,ADD,2026-12-01,https://www.prnewswire.com/news-releases/sharkninja-set-to-join-sp-500-others-to-join-sp-midcap-400-and-sp-smallcap-600-302948731.html,Merger/Acquisition: Transocean is acquiring Valaris in a deal expected to close soon pending final conditions.
+S&P 400,VAL,Valaris,REMOVE,2026-12-01,https://www.prnewswire.com/news-releases/sharkninja-set-to-join-sp-500-others-to-join-sp-midcap-400-and-sp-smallcap-600-302948731.html,Merger/Acquisition: Transocean is acquiring Valaris in a deal expected to close soon pending final conditions.
+S&P 400,PAYC,Paycom Software,ADD,2026-12-02,https://www.prnewswire.com/news-releases/sharkninja-set-to-join-sp-500-others-to-join-sp-midcap-400-and-sp-smallcap-600-302948731.html,
+S&P 400,SN,SharkNinja,REMOVE,2026-12-02,https://www.prnewswire.com/news-releases/sharkninja-set-to-join-sp-500-others-to-join-sp-midcap-400-and-sp-smallcap-600-302948731.html,
+S&P 600,TGLS,Tecnoglass Holdings,ADD,2026-12-01,https://www.prnewswire.com/news-releases/sharkninja-set-to-join-sp-500-others-to-join-sp-midcap-400-and-sp-smallcap-600-302948731.html,
+S&P 600,HZO,MarineMax,REMOVE,2026-12-01,https://www.prnewswire.com/news-releases/sharkninja-set-to-join-sp-500-others-to-join-sp-midcap-400-and-sp-smallcap-600-302948731.html,
+S&P 600,GRDN,Guardian Pharmacy Services,ADD,2026-12-02,https://www.prnewswire.com/news-releases/sharkninja-set-to-join-sp-500-others-to-join-sp-midcap-400-and-sp-smallcap-600-302948731.html,
+S&P 600,PAYC,Paycom Software,REMOVE,2026-12-02,https://www.prnewswire.com/news-releases/sharkninja-set-to-join-sp-500-others-to-join-sp-midcap-400-and-sp-smallcap-600-302948731.html,
